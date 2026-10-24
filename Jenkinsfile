@@ -10,12 +10,12 @@ pipeline {
         choice(
             name: 'ACTION',
             choices: ['DEPLOY', 'ROLLBACK'],
-            description: 'Choose deployment or rollback'
+            description: 'Deploy a version or roll back to the previous successful release'
         )
         string(
             name: 'APP_VERSION',
-            defaultValue: '1.3',
-            description: 'Version to deploy; ignored for rollback'
+            defaultValue: '1.5',
+            description: 'Version to deploy; ignored during rollback'
         )
     }
 
@@ -24,10 +24,11 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+                    bash -n scripts/release-common.sh
                     bash -n scripts/deploy.sh
                     bash -n scripts/rollback.sh
                     docker info >/dev/null
-                    echo "Validation passed."
+                    echo "Scripts and Docker validation passed."
                 '''
             }
         }
@@ -60,10 +61,15 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
+                    echo "===== APPLICATION RESPONSE ====="
                     curl --fail --silent --show-error \
                         http://127.0.0.1:18080/ \
-                        | grep -E 'Version:|Status: Running'
+                        | tee /tmp/project2-app-response.txt
 
+                    grep -F "Status: Running" /tmp/project2-app-response.txt
+
+                    echo "===== CONTAINER HEALTH ====="
                     test "$(docker inspect --format '{{.State.Status}}' cicd-demo-app)" = "running"
                     test "$(docker inspect --format '{{.State.Health.Status}}' cicd-demo-app)" = "healthy"
 

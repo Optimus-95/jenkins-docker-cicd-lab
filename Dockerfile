@@ -1,6 +1,7 @@
 FROM nginx:alpine
 
 ARG APP_VERSION=1.0
+LABEL org.opencontainers.image.version="${APP_VERSION}"
 
 COPY app/index.html /usr/share/nginx/html/index.html
 

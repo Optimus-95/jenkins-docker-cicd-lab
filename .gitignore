@@ -22,3 +22,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Generated release history; rebuilt on each server
+.runtime/
