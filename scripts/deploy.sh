@@ -30,6 +30,13 @@ docker build \
 
 NEW_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE:v$VERSION")"
 
+# A repeated deployment of the exact same image must not overwrite history.
+if [[ -n "$OLD_ID" && "$OLD_ID" == "$NEW_ID" ]]; then
+    echo "Version $VERSION is already running with the same image."
+    echo "Skipping deployment and preserving release history."
+    exit 0
+fi
+
 if [[ -n "$OLD_ID" ]]; then
     create_snapshot "$OLD_VERSION" "$OLD_ID"
 fi
