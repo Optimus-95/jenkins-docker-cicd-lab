@@ -120,6 +120,35 @@ A healthy deployment should report `running healthy` and show the deployed appli
 - **Rollback image missing:** inspect the release-history image ID and local Docker images.
 - **Port conflict:** confirm nothing else is listening on host port `18080`.
 
+## 📸 Project Screenshots
+
+### 1. GitHub Repository
+![GitHub Repository](docs/screenshots/01-github-repository-2.png)
+
+### 2. Jenkins Pipeline — Deployment
+![Jenkins Deployment Pipeline](docs/screenshots/02-jenkins-pipeline-deployed.png)
+
+### 3. Jenkins Pipeline — Rollback
+![Jenkins Rollback Pipeline](docs/screenshots/02-jenkins-pipeline-rollback.png)
+
+### 4. Deployment Logs
+![Deployment Success](docs/screenshots/03-deployment-success.png)
+
+### 5. Application Running
+![Application Running](docs/screenshots/04-application-running.png)
+
+### 6. Docker Health and Rollback Backups
+![Docker Health and Backups](docs/screenshots/05-container-health-backups.png)
+
+### 7. Rollback Verification
+![Rollback Success](docs/screenshots/06-rollback-success.png)
+
+### 8. Project Structure
+![Project Structure](docs/screenshots/07-project-structure.png)
+
+### 9. Installation Guide
+![Installation Guide](docs/screenshots/08-installation-guide.png)
+
 ## Security notes
 
 - Do not store SSH private keys, access tokens, or passwords in Git.
