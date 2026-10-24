@@ -1,176 +1,129 @@
-# Jenkins Docker CI/CD Lab
+# Project 2 — Jenkins + Docker CI/CD Lab
 
-A hands-on DevOps project demonstrating Jenkins-driven Docker image builds, application deployment, health verification, image backups, and rollback.
-
-## Project Objectives
-
-- Build a versioned Docker image from application source.
-- Deploy a selected application version through Jenkins.
-- Verify container health and the HTTP response after deployment.
-- Create timestamped backups of the previously deployed image.
-- Roll back to a previous backup through Jenkins.
-- Retain a maximum of two timestamped backup images.
-- Keep deployment logic in shell scripts and orchestration in a Jenkins Pipeline.
+A versioned Docker deployment pipeline using Jenkins, Docker, Bash, and Nginx. The pipeline validates the environment, builds a versioned image, deploys it, checks container health, maintains release history, and supports rollback.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    Dev[Developer] --> Git[GitHub Repository]
-    Git --> Jenkins[Jenkins Pipeline]
-    Jenkins --> Validate[Validate Scripts and Docker]
-    Validate --> Action{Selected Action}
-    Action -->|DEPLOY| Build[Build Versioned Docker Image]
-    Build --> Backup[Tag Current Image as Backup]
-    Backup --> Deploy[Replace Application Container]
-    Deploy --> Health[Health and HTTP Verification]
-    Action -->|ROLLBACK| Restore[Restore Latest Backup]
-    Restore --> Health
-    Health --> App[Demo Web App]
-    App --> Port[Host Port 18080]
-```
+GitHub → Jenkins Pipeline → Validate → Build image → Deploy container → Health check
 
-## Repository Structure
+If a deployment fails, the script attempts to restore the previously running image.
+
+## Repository structure
 
 ```text
 jenkins-docker-cicd-lab/
-├── Jenkinsfile
-├── Dockerfile
-├── README.md
-├── .gitignore
 ├── app/
 │   └── index.html
+├── backups/
+├── docs/
+│   ├── INSTALLATION.md
+│   └── SCREENSHOTS.md
+├── logs/
 ├── scripts/
+│   ├── release-common.sh
 │   ├── deploy.sh
 │   └── rollback.sh
-├── docs/
-│   └── SCREENSHOTS.md
-├── screenshots/
-└── backups/
+├── config.env.example
+├── Dockerfile
+├── Jenkinsfile
+├── .gitignore
+└── README.md
 ```
 
-## Technology Stack
+## Requirements
 
-- Jenkins Pipeline
-- Docker Engine
-- Docker images and containers
-- Bash scripting
-- Git and GitHub
-- Nginx Alpine
-- Linux health checks and HTTP verification
+- Ubuntu Linux server
+- A supported Jenkins LTS installation and compatible Java version
+- Git and SSH access to the GitHub repository
+- Docker Engine and Docker Compose plugin
+- `bash` and `curl`
+- Jenkins agent with Docker CLI access and permission to use the Docker daemon
 
-## Prerequisites
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for clean-server setup.
 
-- A Linux host with Docker Engine installed and running.
-- Jenkins with Pipeline support.
-- Git installed on the Jenkins host.
-- Jenkins permission to use Docker.
-- The project checked out into the Jenkins workspace.
-- `curl`, Bash, and the `docker` CLI available to Jenkins.
+## Jenkins job configuration
 
-> Docker group membership provides highly privileged access to the host. Use this arrangement only where the security implications are understood.
+Create a Pipeline job configured to use **Pipeline script from SCM**:
 
-## Jenkins Parameters
+- SCM: Git
+- Repository: `git@github.com:Optimus-95/jenkins-docker-cicd-lab.git`
+- Branch: `*/main`
+- Script path: `Jenkinsfile`
+- Credentials: a Jenkins-managed SSH credential authorized to access the private repository
 
-| Parameter | Values | Purpose |
-|---|---|---|
-| `ACTION` | `DEPLOY`, `ROLLBACK` | Select deployment or rollback |
-| `APP_VERSION` | For example, `1.3` | Image version used for deployment |
+The Jenkins agent executing the pipeline must have Docker access. The job's pipeline environment configures the image, container, port, release-history limit, and rollback-snapshot limit.
 
-The current lab publishes the application on host port `18080`.
+## Parameters
 
-## Deployment Flow
+| Parameter | Purpose |
+|---|---|
+| `ACTION` | `DEPLOY` or `ROLLBACK` |
+| `APP_VERSION` | New version for a deployment, e.g. `1.8` |
+| `ROLLBACK_VERSION` | Optional exact release version to restore; blank selects the previous release |
 
-1. Jenkins checks out the repository.
-2. The Pipeline validates the scripts and Docker access.
-3. The deployment script builds a versioned image.
-4. The current image is tagged as a timestamped backup.
-5. The application container is recreated using the requested image.
-6. The script waits for container health and checks the HTTP response.
-7. Older timestamped backup tags are pruned to retain at most two.
+## Deployment behavior
 
-## Rollback Flow
+1. Validate shell syntax and Docker availability.
+2. Build an immutable versioned image such as `cicd-demo-app:v1.8`.
+3. Record the Git commit in the image metadata.
+4. Tag the currently running image as a rollback snapshot.
+5. Replace the container and wait for its Docker health check.
+6. Verify the application version through HTTP.
+7. Record the successful release and prune old history/snapshots according to configured limits.
 
-1. Jenkins runs the rollback script.
-2. The script selects the newest timestamped backup by tag.
-3. The container is recreated using that image.
-4. The script checks container health and the HTTP response.
+Version tags already recorded in release history cannot be redeployed as new releases. Choose a new version for a new deployment.
 
-Rollback selects the latest available backup; it does not necessarily select the immediately preceding deployment if multiple deployments or rollbacks have occurred.
+## Rollback behavior
 
-## Local Verification
+- Leave `ROLLBACK_VERSION` blank to select the previous release in history.
+- Set `ROLLBACK_VERSION` to a version such as `1.4` to select that exact recorded release.
+- The selected image must still exist locally.
+- A successful rollback moves the selected release to the top of release history.
+- The current image is snapshotted before the rollback attempt.
+- If the replacement fails verification, the script attempts to restore the previously running image.
 
-Inspect the running container:
+Rollback requires at least two releases in history. Release history is stored by default at:
+
+`$JENKINS_HOME/.local/state/jenkins-docker-cicd-lab/releases.tsv`
+
+The history and images are local to the Docker host. Back up the history file and required images if rollback must survive server loss.
+
+## Defaults
+
+- Container: `cicd-demo-app`
+- Host port: `18080`
+- App URL: `http://SERVER-IP:18080/`
+- Rollback snapshots retained: 2
+- Release-history entries retained: 10
+
+`config.env.example` documents optional script configuration. Copy it to `config.env` only when intentionally overriding settings; do not commit private configuration or secrets. The Jenkinsfile sets its own pipeline environment, so coordinate any custom configuration with that environment.
+
+## Verification
+
+On the Docker host:
 
 ```bash
-sudo docker ps --filter name=cicd-demo-app
-sudo docker inspect cicd-demo-app \
-  --format 'Status={{.State.Status}} Health={{.State.Health.Status}}'
+curl --fail http://127.0.0.1:18080/
+docker ps --filter name=cicd-demo-app
+docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' cicd-demo-app
+docker image ls cicd-demo-app
 ```
 
-Check the application response:
-
-```bash
-curl --fail --silent --show-error http://127.0.0.1:18080/ \
-  | grep -E 'Version:|Status: Running'
-```
-
-List application images and backups:
-
-```bash
-sudo docker image ls cicd-demo-app
-```
-
-## Repository Setup
-
-1. Push this project to your GitHub repository.
-2. In Jenkins, configure the job as **Pipeline script from SCM**.
-3. Select **Git** as the SCM.
-4. Enter the GitHub repository URL and configure credentials if the repository is private.
-5. Set the branch to the intended branch, such as `*/main`.
-6. Set the Script Path to `Jenkinsfile`.
-7. Save and run the job with `ACTION=DEPLOY`.
-
-The Jenkinsfile and scripts in this repository are the source of truth for the workflow. Validate the actual build and rollback results before presenting the project as production-ready.
+A healthy deployment should report `running healthy` and show the deployed application version in the HTTP response.
 
 ## Troubleshooting
 
-### Jenkins cannot access Docker
+- **Docker permission denied:** confirm the Jenkins execution user can run `docker info`; restart Jenkins after changing group membership.
+- **Git checkout fails:** verify the Jenkins SSH credential and GitHub repository access.
+- **Health check fails:** inspect `docker logs cicd-demo-app` and the Jenkins Console Output.
+- **Version already exists:** choose a new version or use the rollback action.
+- **Rollback image missing:** inspect the release-history image ID and local Docker images.
+- **Port conflict:** confirm nothing else is listening on host port `18080`.
 
-Check that Jenkins has the intended Docker permissions and that the Docker service is running:
+## Security notes
 
-```bash
-sudo systemctl status docker --no-pager
-id jenkins
-sudo -u jenkins docker info
-```
-
-### Deployment fails its health check
-
-Inspect the container and logs:
-
-```bash
-sudo docker ps -a --filter name=cicd-demo-app
-sudo docker logs cicd-demo-app
-sudo docker inspect cicd-demo-app
-```
-
-### Application is not reachable
-
-```bash
-curl -v http://127.0.0.1:18080/
-sudo docker port cicd-demo-app
-```
-
-Check port conflicts and host firewall rules if needed.
-
-## Screenshots
-
-See [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) for the portfolio capture checklist.
-
-## Security Notes
-
-- Never commit passwords, tokens, private keys, `.env` files, or Jenkins secrets.
-- Use Jenkins credentials for private repository access.
-- Use sanitized screenshots and generic lab names in a public portfolio.
-- This is a learning lab. Review deployment and rollback behavior before adapting it to production.
+- Do not store SSH private keys, access tokens, or passwords in Git.
+- Use Jenkins Credentials for repository access.
+- Restrict access to Jenkins and the Docker daemon; Docker access is highly privileged.
+- Use HTTPS and appropriate network controls when exposing Jenkins or the demo application outside a lab.
+- Do not use this demonstration pipeline in production without environment-specific security, availability, and recovery controls.
