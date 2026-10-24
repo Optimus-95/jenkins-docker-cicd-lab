@@ -25,3 +25,6 @@ Thumbs.db
 
 # Generated release history; rebuilt on each server
 .runtime/
+
+# Local application configuration; commit only config.env.example
+config.env

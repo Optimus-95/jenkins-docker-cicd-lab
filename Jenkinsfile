@@ -1,24 +1,26 @@
 pipeline {
     agent any
-
     options {
         timestamps()
         disableConcurrentBuilds()
     }
-
-    parameters {
-        choice(
-            name: 'ACTION',
-            choices: ['DEPLOY', 'ROLLBACK'],
-            description: 'Deploy a version or roll back to the previous successful release'
-        )
-        string(
-            name: 'APP_VERSION',
-            defaultValue: '1.5',
-            description: 'Version to deploy; ignored during rollback'
-        )
+    environment {
+        STATE_DIR = "${env.JENKINS_HOME}/.local/state/jenkins-docker-cicd-lab"
+        IMAGE = "cicd-demo-app"
+        CONTAINER_NAME = "cicd-demo-app"
+        HOST_PORT = "18080"
+        HEALTHCHECK_URL = "http://127.0.0.1:18080/"
+        MAX_RELEASES = "10"
+        MAX_ROLLBACK_SNAPSHOTS = "2"
     }
-
+    parameters {
+        choice(name: 'ACTION', choices: ['DEPLOY', 'ROLLBACK'],
+               description: 'Deploy a new version or roll back')
+        string(name: 'APP_VERSION', defaultValue: '1.7',
+               description: 'New version to deploy; ignored during rollback')
+        string(name: 'ROLLBACK_VERSION', defaultValue: '',
+               description: 'Optional exact version to restore, e.g. 1.4; blank means previous release')
+    }
     stages {
         stage('Validate') {
             steps {
@@ -28,63 +30,45 @@ pipeline {
                     bash -n scripts/deploy.sh
                     bash -n scripts/rollback.sh
                     docker info >/dev/null
-                    echo "Scripts and Docker validation passed."
+                    echo "Script syntax and Docker validation passed."
                 '''
             }
         }
-
         stage('Deploy') {
-            when {
-                expression { params.ACTION == 'DEPLOY' }
-            }
+            when { expression { params.ACTION == 'DEPLOY' } }
             steps {
-                sh '''
-                    set -eu
-                    bash scripts/deploy.sh "$APP_VERSION"
-                '''
+                sh 'bash scripts/deploy.sh "$APP_VERSION"'
             }
         }
-
         stage('Rollback') {
-            when {
-                expression { params.ACTION == 'ROLLBACK' }
-            }
+            when { expression { params.ACTION == 'ROLLBACK' } }
             steps {
                 sh '''
                     set -eu
-                    bash scripts/rollback.sh
+                    if [ -n "$ROLLBACK_VERSION" ]; then
+                        bash scripts/rollback.sh "$ROLLBACK_VERSION"
+                    else
+                        bash scripts/rollback.sh
+                    fi
                 '''
             }
         }
-
         stage('Verify') {
             steps {
                 sh '''
                     set -eu
-
-                    echo "===== APPLICATION RESPONSE ====="
-                    curl --fail --silent --show-error \
-                        http://127.0.0.1:18080/ \
-                        | tee /tmp/project2-app-response.txt
-
+                    curl --fail --silent --show-error "$HEALTHCHECK_URL" |
+                        tee /tmp/project2-app-response.txt
                     grep -F "Status: Running" /tmp/project2-app-response.txt
-
-                    echo "===== CONTAINER HEALTH ====="
-                    test "$(docker inspect --format '{{.State.Status}}' cicd-demo-app)" = "running"
-                    test "$(docker inspect --format '{{.State.Health.Status}}' cicd-demo-app)" = "healthy"
-
+                    test "$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME")" = running
+                    test "$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER_NAME")" = healthy
                     echo "Application verification passed."
                 '''
             }
         }
     }
-
     post {
-        success {
-            echo 'CI/CD operation completed successfully.'
-        }
-        failure {
-            echo 'Pipeline failed. Review Console Output.'
-        }
+        success { echo 'CI/CD operation completed successfully.' }
+        failure { echo 'Pipeline failed. Review Console Output.' }
     }
 }

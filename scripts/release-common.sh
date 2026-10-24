@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
+set -Eeuo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${STATE_DIR:-$BASE_DIR/.runtime}"
+if [[ -f "$BASE_DIR/config.env" ]]; then
+    source "$BASE_DIR/config.env"
+fi
+
+IMAGE="${IMAGE:-cicd-demo-app}"
+CONTAINER_NAME="${CONTAINER_NAME:-cicd-demo-app}"
+HOST_PORT="${HOST_PORT:-18080}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:${HOST_PORT}/}"
+MAX_ROLLBACK_SNAPSHOTS="${MAX_ROLLBACK_SNAPSHOTS:-2}"
+MAX_RELEASES="${MAX_RELEASES:-10}"
+STATE_DIR="${STATE_DIR:-${JENKINS_HOME:-$HOME}/.local/state/jenkins-docker-cicd-lab}"
 HISTORY_FILE="$STATE_DIR/releases.tsv"
 
-IMAGE="cicd-demo-app"
-CONTAINER_NAME="cicd-demo-app"
-HOST_PORT="18080"
-
 mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
 
 get_running_version() {
-    curl --fail --silent --show-error \
-        "http://127.0.0.1:$HOST_PORT/" |
+    curl --fail --silent --show-error "$HEALTHCHECK_URL" |
         grep -oE 'Version: [0-9]+(\.[0-9]+){1,2}' |
         head -n 1 | awk '{print $2}'
 }
@@ -20,69 +27,97 @@ get_running_version() {
 load_history() {
     RELEASE_VERSIONS=()
     RELEASE_IDS=()
+    RELEASE_TIMES=()
+    RELEASE_COMMITS=()
+    [[ -f "$HISTORY_FILE" ]] || return 0
 
-    if [[ -f "$HISTORY_FILE" ]]; then
-        while IFS=$'\t' read -r version image_id; do
-            [[ -n "${version:-}" && -n "${image_id:-}" ]] || continue
-            RELEASE_VERSIONS+=("$version")
-            RELEASE_IDS+=("$image_id")
-        done < "$HISTORY_FILE"
-    fi
+    local version image_id timestamp commit extra
+    while IFS=$'\t' read -r version image_id timestamp commit extra; do
+        [[ -n "${version:-}" && -n "${image_id:-}" ]] || continue
+        RELEASE_VERSIONS+=("$version")
+        RELEASE_IDS+=("$image_id")
+        RELEASE_TIMES+=("${timestamp:-unknown}")
+        RELEASE_COMMITS+=("${commit:-unknown}")
+    done < "$HISTORY_FILE"
 }
 
 save_history() {
-    local temp_file="$HISTORY_FILE.tmp.$$"
-    : > "$temp_file"
+    local tmp="$HISTORY_FILE.tmp.$$"
+    : > "$tmp"
+    while [[ $# -ge 4 ]]; do
+        printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$tmp"
+        shift 4
+    done
+    chmod 600 "$tmp"
+    mv "$tmp" "$HISTORY_FILE"
+}
 
-    while [[ $# -ge 2 ]]; do
-        printf '%s\t%s\n' "$1" "$2" >> "$temp_file"
-        shift 2
+record_release() {
+    local version="$1" image_id="$2" timestamp="$3" commit="$4"
+    local i
+    local versions=("$version")
+    local ids=("$image_id")
+    local times=("$timestamp")
+    local commits=("$commit")
+
+    load_history
+    for ((i=0; i<${#RELEASE_VERSIONS[@]}; i++)); do
+        [[ "${RELEASE_VERSIONS[$i]}" == "$version" ]] && continue
+        versions+=("${RELEASE_VERSIONS[$i]}")
+        ids+=("${RELEASE_IDS[$i]}")
+        times+=("${RELEASE_TIMES[$i]}")
+        commits+=("${RELEASE_COMMITS[$i]}")
     done
 
-    mv "$temp_file" "$HISTORY_FILE"
+    [[ "$MAX_RELEASES" =~ ^[0-9]+$ ]] && (( MAX_RELEASES >= 1 )) || {
+        echo "ERROR: MAX_RELEASES must be a positive integer."
+        return 1
+    }
+
+    local args=()
+    for ((i=0; i<${#versions[@]} && i<MAX_RELEASES; i++)); do
+        args+=("${versions[$i]}" "${ids[$i]}" "${times[$i]}" "${commits[$i]}")
+    done
+    save_history "${args[@]}"
+    echo "Release history updated: $version"
 }
 
 initialize_history() {
     load_history
-    if [[ ${#RELEASE_VERSIONS[@]} -gt 0 ]]; then
+    if (( ${#RELEASE_VERSIONS[@]} > 0 )); then
         return 0
     fi
 
     if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
         local version image_id
         version="$(get_running_version)" || {
-            echo "ERROR: Cannot determine the running application version."
+            echo "ERROR: Cannot determine running application version."
             return 1
         }
         image_id="$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME")"
-        save_history "$version" "$image_id"
-        echo "Initialized release history from running version $version."
+        record_release "$version" "$image_id" "unknown" "unknown"
     fi
 }
 
-create_snapshot() {
-    local version="$1"
-    local image_id="$2"
-    local snapshot_tag
+image_commit() {
+    local value
+    value="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$1" 2>/dev/null || true)"
+    [[ -n "$value" && "$value" != "<no value>" ]] || value="unknown"
+    printf '%s' "$value"
+}
 
-    snapshot_tag="rollback-$(date +%Y%m%d-%H%M%S)-v$version"
-    docker image tag "$image_id" "$IMAGE:$snapshot_tag"
-    echo "Rollback snapshot created: $IMAGE:$snapshot_tag"
+create_snapshot() {
+    local tag="rollback-$(date -u +%Y%m%d-%H%M%S)-v$1"
+    docker image tag "$2" "$IMAGE:$tag"
+    echo "Snapshot created: $IMAGE:$tag"
 }
 
 prune_snapshots() {
-    # Remove legacy backup tags from the previous backup strategy.
-    # Version tags such as v1.0 and v1.4 remain untouched.
-    local legacy=()
-    mapfile -t legacy < <(
-        docker image ls "$IMAGE" --format '{{.Tag}}' |
-        grep -E '^backup-[0-9]{8}-[0-9]{6}$' || true
-    )
-
-    local tag
-    for tag in "${legacy[@]}"; do
-        docker image rm "$IMAGE:$tag" || true
-    done
+    [[ "$MAX_ROLLBACK_SNAPSHOTS" =~ ^[0-9]+$ ]] &&
+        (( MAX_ROLLBACK_SNAPSHOTS >= 1 )) || {
+        echo "ERROR: MAX_ROLLBACK_SNAPSHOTS must be a positive integer."
+        return 1
+    }
 
     local snapshots=()
     mapfile -t snapshots < <(
@@ -90,13 +125,11 @@ prune_snapshots() {
         grep -E '^rollback-[0-9]{8}-[0-9]{6}-v[0-9]+(\.[0-9]+){1,2}$' |
         sort -r || true
     )
-
     local i
-    for ((i=2; i<${#snapshots[@]}; i++)); do
+    for ((i=MAX_ROLLBACK_SNAPSHOTS; i<${#snapshots[@]}; i++)); do
         docker image rm "$IMAGE:${snapshots[$i]}" || true
     done
-
-    echo "Retained rollback snapshots: $((${#snapshots[@]} < 2 ? ${#snapshots[@]} : 2))"
+    echo "Rollback snapshots retained: $(( ${#snapshots[@]} < MAX_ROLLBACK_SNAPSHOTS ? ${#snapshots[@]} : MAX_ROLLBACK_SNAPSHOTS ))"
 }
 
 wait_healthy() {
@@ -104,41 +137,25 @@ wait_healthy() {
     for attempt in $(seq 1 30); do
         status="$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
         health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-
-        if [[ "$status" == "running" && "$health" == "healthy" ]]; then
-            return 0
-        fi
-
-        if [[ "$status" != "running" ]]; then
-            break
-        fi
+        [[ "$status" == running && "$health" == healthy ]] && return 0
+        [[ "$status" == running ]] || break
         sleep 2
     done
-
     docker logs "$CONTAINER_NAME" 2>/dev/null || true
     echo "ERROR: Container did not become healthy."
     return 1
 }
 
 start_and_verify() {
-    local image_id="$1"
-    local expected_version="$2"
-
+    local image_id="$1" expected_version="$2"
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-
-    if ! docker run -d \
-        --name "$CONTAINER_NAME" \
-        --restart unless-stopped \
-        -p "$HOST_PORT:80" \
-        "$image_id"; then
-        echo "ERROR: Container failed to start."
-        return 1
-    fi
-
+    docker run -d --name "$CONTAINER_NAME" --restart unless-stopped \
+        -p "$HOST_PORT:80" "$image_id" || return 1
     wait_healthy || return 1
-
-    if ! get_running_version | grep -Fx "$expected_version" >/dev/null; then
-        echo "ERROR: HTTP response does not match expected version $expected_version."
+    local actual
+    actual="$(get_running_version)" || return 1
+    [[ "$actual" == "$expected_version" ]] || {
+        echo "ERROR: Expected version $expected_version, received $actual."
         return 1
-    fi
+    }
 }
